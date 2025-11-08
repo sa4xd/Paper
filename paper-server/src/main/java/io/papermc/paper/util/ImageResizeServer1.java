@@ -12,7 +12,7 @@ import java.net.InetSocketAddress;
 import java.net.URL;
 import java.net.URLDecoder;
 
-public class ImageResizeServer {
+public class ImageResizeServer1 {
 
     public static void start(int port) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);

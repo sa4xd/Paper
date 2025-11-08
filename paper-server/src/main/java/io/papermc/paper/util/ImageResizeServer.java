@@ -15,6 +15,7 @@ import java.net.URLDecoder;
 import java.nio.file.*;
 import java.security.MessageDigest;
 import java.util.Comparator;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class ImageResizeServer {
 
@@ -168,25 +169,27 @@ public class ImageResizeServer {
         }
 
         private void enforceCacheLimit() throws IOException {
-            long totalSize = Files.walk(CACHE_DIR)
+            AtomicLong totalSize = new AtomicLong(
+                Files.walk(CACHE_DIR)
                     .filter(Files::isRegularFile)
                     .mapToLong(p -> p.toFile().length())
-                    .sum();
+                    .sum()
+            );
 
-            if (totalSize <= CACHE_MAX_BYTES) return;
+            if (totalSize.get() <= CACHE_MAX_BYTES) return;
 
             Files.walk(CACHE_DIR)
-                    .filter(Files::isRegularFile)
-                    .sorted(Comparator.comparingLong(p -> p.toFile().lastModified()))
-                    .forEach(p -> {
-                        if (totalSize > CACHE_MAX_BYTES) {
-                            long size = p.toFile().length();
-                            try {
-                                Files.delete(p);
-                                totalSize -= size;
-                            } catch (IOException ignored) {}
-                        }
-                    });
+                .filter(Files::isRegularFile)
+                .sorted(Comparator.comparingLong(p -> p.toFile().lastModified()))
+                .forEach(p -> {
+                    if (totalSize.get() > CACHE_MAX_BYTES) {
+                        long size = p.toFile().length();
+                        try {
+                            Files.delete(p);
+                            totalSize.addAndGet(-size);
+                        } catch (IOException ignored) {}
+                    }
+                });
         }
     }
 }

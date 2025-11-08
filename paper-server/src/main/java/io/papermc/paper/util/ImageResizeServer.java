@@ -19,13 +19,13 @@ public class ImageResizeServer {
         server.createContext("/", new ResizeHandler());
         server.setExecutor(null);
         server.start();
-        System.out.println("ImageResizeServer started on port " + port);
+        System.out.println("✅ ImageResizeServer started on port " + port);
     }
 
     static class ResizeHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
-            if (!"GET".equals(exchange.getRequestMethod())) {
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
                 exchange.sendResponseHeaders(405, -1);
                 return;
             }
@@ -47,16 +47,26 @@ public class ImageResizeServer {
                 }
             }
 
+            if (imageUrl == null) {
+                String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Image Resize Server</title></head>" +
+                        "<body><h2>📷 图片缩放服务</h2>" +
+                        "<p>使用格式：<code>?url=图片地址&w=宽度&h=高度</code></p>" +
+                        "<p>示例：<a href='/?url=https://example.com/image.jpg&w=300&h=200'>点击查看缩放效果</a></p>" +
+                        "</body></html>";
+                byte[] response = html.getBytes("UTF-8");
+                exchange.getResponseHeaders().add("Content-Type", "text/html; charset=UTF-8");
+                exchange.sendResponseHeaders(200, response.length);
+                exchange.getResponseBody().write(response);
+                exchange.getResponseBody().close();
+                return;
+            }
+
             BufferedImage original;
-            if (imageUrl != null) {
+            try {
                 original = ImageIO.read(new URL(imageUrl));
-            } else {
-                File fallback = new File("z.png");
-                if (!fallback.exists()) {
-                    exchange.sendResponseHeaders(404, -1);
-                    return;
-                }
-                original = ImageIO.read(fallback);
+            } catch (Exception e) {
+                exchange.sendResponseHeaders(400, -1);
+                return;
             }
 
             BufferedImage resized = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);

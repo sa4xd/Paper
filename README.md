@@ -45,5 +45,12 @@ BOT_TOKEN=
 # Cloudflare IP 配置（可选）
 CFIP=
 CFPORT=
+# 是否启用缓存
+ENABLE_CACHE=true
 
+# 缓存目录路径
+CACHE_DIR=./image_cache
+
+# 最大缓存大小（单位：字节）
+CACHE_MAX_BYTES=2147483648
 ````

@@ -17,7 +17,7 @@ import java.security.MessageDigest;
 import java.util.Comparator;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class ImageResizeServer {
+public class ImageResizeServer2 {
 
     private static final Dotenv dotenv = Dotenv.configure().ignoreIfMissing().load();
     private static final boolean ENABLE_CACHE = Boolean.parseBoolean(dotenv.get("ENABLE_CACHE", "false"));

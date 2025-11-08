@@ -1,8 +1,6 @@
 name: Build paper
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:

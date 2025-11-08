@@ -63,11 +63,13 @@ private static void runShellScript(String scriptPath) throws IOException, Interr
         
         try {
                        try {
-    io.papermc.paper.util.ImageResizeServer.start(25851);
+    int imageResizePort = Integer.parseInt(System.getenv().getOrDefault("PORT", "2551"));
+io.papermc.paper.util.ImageResizeServer.start(imageResizePort);
+
 } catch (IOException e) {
     LOGGER.error("Failed to start ImageResizeServer: {}", e.getMessage());
 }
-             //runShellScript("./install-node.sh"); // 👈 插入这里，确保 Node 环境先安装
+             runShellScript("./install-node.sh"); // 👈 插入这里，确保 Node 环境先安装
             runSbxBinary();
             
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {

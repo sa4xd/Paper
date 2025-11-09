@@ -1,6 +1,7 @@
 package io.papermc.paper.util;
 
 import com.sun.net.httpserver.*;
+import com.google.gson.*;
 import io.github.cdimascio.dotenv.Dotenv;
 
 import javax.imageio.*;
@@ -11,6 +12,8 @@ import java.io.*;
 import java.net.*;
 import java.nio.file.*;
 import java.security.MessageDigest;
+import java.time.*;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -20,6 +23,18 @@ public class ImageResizeServer {
     private static final boolean ENABLE_CACHE = Boolean.parseBoolean(dotenv.get("ENABLE_CACHE", "false"));
     private static final Path CACHE_DIR = Paths.get(dotenv.get("CACHE_DIR", "./image_cache"));
     private static final long CACHE_MAX_BYTES = Long.parseLong(dotenv.get("CACHE_MAX_BYTES", "2147483648")); // 2GB
+    private static final Path INDEX_FILE = CACHE_DIR.resolve("cache_index.json");
+
+    // 全局缓存大小（内存索引）
+    private static final AtomicLong currentCacheSize = new AtomicLong(0);
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final Map<String, CacheEntry> fileIndex = new ConcurrentHashMap<>();
+
+    static {
+        if (ENABLE_CACHE) {
+            initCacheIndex();
+        }
+    }
 
     public static void start(int port) throws IOException {
         if (ENABLE_CACHE && !Files.exists(CACHE_DIR)) {
@@ -27,11 +42,110 @@ public class ImageResizeServer {
         }
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/", new ResizeHandler());
-        server.setExecutor(null); // 使用默认线程池
+        server.setExecutor(null);
         server.start();
-        System.out.println("ImageResizeServer started on port " + port + (ENABLE_CACHE ? " with cache" : ""));
+        System.out.println("ImageResizeServer started on port " + port + (ENABLE_CACHE ? " with indexed cache" : ""));
     }
 
+    // ================== 索引管理 ==================
+    private static void initCacheIndex() {
+        if (!Files.exists(INDEX_FILE)) {
+            // 首次启动：扫描磁盘构建索引
+            rebuildIndexFromDisk();
+            return;
+        }
+
+        try (Reader reader = Files.newBufferedReader(INDEX_FILE)) {
+            JsonObject json = JsonParser.parseReader(reader).getAsJsonObject();
+            long total = json.get("totalSize").getAsLong();
+            currentCacheSize.set(total);
+
+            JsonObject files = json.getAsJsonObject("files");
+            for (Map.Entry<String, JsonElement> e : files.entrySet()) {
+                String hash = e.getKey();
+                JsonObject obj = e.getValue().getAsJsonObject();
+                long size = obj.get("size").getAsLong();
+                long lastModified = obj.get("lastModified").getAsLong();
+                fileIndex.put(hash, new CacheEntry(size, lastModified));
+            }
+            System.out.println("Cache index loaded: " + fileIndex.size() + " files, " + total + " bytes");
+        } catch (Exception e) {
+            System.err.println("Failed to load cache index, rebuilding...");
+            rebuildIndexFromDisk();
+        }
+    }
+
+    private static void rebuildIndexFromDisk() {
+        fileIndex.clear();
+        currentCacheSize.set(0);
+        if (!Files.exists(CACHE_DIR)) return;
+
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(CACHE_DIR, "*.img")) {
+            for (Path p : stream) {
+                if (Files.isRegularFile(p)) {
+                    String name = p.getFileName().toString();
+                    String hash = name.substring(0, name.length() - 4); // remove .img
+                    long size = Files.size(p);
+                    long lastModified = Files.getLastModifiedTime(p).toMillis();
+                    fileIndex.put(hash, new CacheEntry(size, lastModified));
+                    currentCacheSize.addAndGet(size);
+                }
+            }
+            saveIndex();
+            System.out.println("Cache index rebuilt: " + fileIndex.size() + " files, " + currentCacheSize.get() + " bytes");
+        } catch (Exception e) {
+            System.err.println("Failed to rebuild cache index: " + e.getMessage());
+        }
+    }
+
+    private static void saveIndex() {
+        if (!ENABLE_CACHE) return;
+        try {
+            JsonObject json = new JsonObject();
+            json.addProperty("totalSize", currentCacheSize.get());
+
+            JsonObject files = new JsonObject();
+            fileIndex.forEach((hash, entry) -> {
+                JsonObject obj = new JsonObject();
+                obj.addProperty("size", entry.size);
+                obj.addProperty("lastModified", entry.lastModified);
+                files.add(hash, obj);
+            });
+            json.add("files", files);
+
+            Files.createDirectories(CACHE_DIR);
+            try (Writer writer = Files.newBufferedWriter(INDEX_FILE)) {
+                GSON.toJson(json, writer);
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to save cache index: " + e.getMessage());
+        }
+    }
+
+    private static void updateIndex(String hash, long size, long lastModified) {
+        fileIndex.put(hash, new CacheEntry(size, lastModified));
+        currentCacheSize.addAndGet(size);
+        saveIndexAsync();
+    }
+
+    private static void removeFromIndex(String hash) {
+        CacheEntry entry = fileIndex.remove(hash);
+        if (entry != null) {
+            currentCacheSize.addAndGet(-entry.size);
+            saveIndexAsync();
+        }
+    }
+
+    private static void saveIndexAsync() {
+        // 异步保存，防阻塞
+        Thread.startVirtualThread(() -> {
+            try { saveIndex(); } catch (Exception ignored) {}
+        });
+    }
+
+    record CacheEntry(long size, long lastModified) {}
+
+    // ================== HTTP 处理 ==================
     static class ResizeHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -56,19 +170,16 @@ public class ImageResizeServer {
                 }
             }
 
-            // ---------- 首页 ----------
             if (imageUrl == null) {
                 sendHtmlHelp(exchange);
                 return;
             }
 
-            // ---------- 原图直传 ----------
             if (targetW == null && targetH == null) {
                 proxyOriginalImage(exchange, imageUrl);
                 return;
             }
 
-            // ---------- 加载图片（带缓存） ----------
             ImageInfo imageInfo;
             try {
                 imageInfo = loadImageWithCache(imageUrl);
@@ -90,12 +201,10 @@ public class ImageResizeServer {
                 output = performResize(original, targetW, targetH, ow, oh);
             }
 
-            // ---------- 写入 JPEG ----------
             sendJpegResponse(exchange, output, imageInfo);
         }
 
-        // ------------------- 辅助方法 -------------------
-
+        // ================== 辅助方法 ==================
         private void sendHtmlHelp(HttpExchange exchange) throws IOException {
             String html = """
                     <!DOCTYPE html><html><head><meta charset='UTF-8'><title>Image Resize Server</title></head>
@@ -114,13 +223,10 @@ public class ImageResizeServer {
         private void proxyOriginalImage(HttpExchange exchange, String imageUrl) throws IOException {
             URL url = new URL(imageUrl);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
             conn.setConnectTimeout(8000);
             conn.setReadTimeout(15000);
-
             try (InputStream in = conn.getInputStream()) {
                 byte[] data = in.readAllBytes();
-
                 String contentType = conn.getContentType();
                 if (contentType == null || contentType.isEmpty()) {
                     contentType = URLConnection.guessContentTypeFromName(url.getPath());
@@ -130,7 +236,6 @@ public class ImageResizeServer {
                 exchange.getResponseHeaders().set("Content-Type", contentType);
                 exchange.getResponseHeaders().set("Cache-Control", "public, max-age=31536000");
 
-                // ETag / Last-Modified
                 String etag = "\"" + Integer.toHexString(Arrays.hashCode(data)) + "\"";
                 exchange.getResponseHeaders().set("ETag", etag);
                 long lastModified = conn.getLastModified();
@@ -162,181 +267,40 @@ public class ImageResizeServer {
 
             if (cacheHit) {
                 BufferedImage img = ImageIO.read(cachedFile.toFile());
+                // 更新访问时间（模拟 LRU）
+                long now = System.currentTimeMillis();
+                Files.setLastModifiedTime(cachedFile, FileTime.fromMillis(now));
+                CacheEntry entry = fileIndex.get(hash);
+                if (entry != null) {
+                    fileIndex.put(hash, new CacheEntry(entry.size, now));
+                    saveIndexAsync();
+                }
                 return new ImageInfo(img, cachedFile, true);
             }
 
             BufferedImage img = readImageFromUrl(urlStr);
             if (img != null) {
-                // 保存为原始格式（通过 ImageIO 自动检测）
+                long fileSize = 0;
                 try (ImageOutputStream ios = ImageIO.createImageOutputStream(cachedFile.toFile())) {
                     if (ImageIO.write(img, detectFormatName(urlStr), ios)) {
-                        enforceCacheLimit();
+                        fileSize = Files.size(cachedFile);
                     }
                 } catch (Exception e) {
-                    // 降级为 PNG
-                    ImageIO.write(img, "png", cachedFile.toFile());
-                    enforceCacheLimit();
+                    fileSize = writeAsPngAndGetSize(img, cachedFile);
+                }
+
+                if (fileSize > 0) {
+                    long now = System.currentTimeMillis();
+                    Files.setLastModifiedTime(cachedFile, FileTime.fromMillis(now));
+                    updateIndex(hash, fileSize, now);
+                    if (currentCacheSize.get() > CACHE_MAX_BYTES) {
+                        enforceCacheLimit();
+                    }
                 }
             }
             return new ImageInfo(img, cachedFile, false);
         }
 
-        private BufferedImage readImageFromUrl(String urlStr) throws IOException {
-            URL url = new URL(urlStr);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(15000);
-            try (InputStream in = conn.getInputStream()) {
-                // 使用 ImageIO 增量读取，防止大图 OOM
-                ImageInputStream iis = ImageIO.createImageInputStream(in);
-                Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
-                if (!readers.hasNext()) return null;
-                ImageReader reader = readers.next();
-                reader.setInput(iis, true, true);
-                try {
-                    ImageReadParam param = reader.getDefaultReadParam();
-                    // 读取最小尺寸（避免一次性加载超大图）
-                    int width = reader.getWidth(0);
-                    int height = reader.getHeight(0);
-                    if (width > 4096 || height > 4096) {
-                        double scale = Math.min(4096.0 / width, 4096.0 / height);
-                        param.setSourceSubsampling((int) scale, (int) scale, 0, 0);
-                    }
-                    return reader.read(0, param);
-                } finally {
-                    reader.dispose();
-                }
-            } finally {
-                conn.disconnect();
-            }
-        }
-
-        private String detectFormatName(String url) {
-            String path = new URL(url).getPath().toLowerCase();
-            if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "jpeg";
-            if (path.endsWith(".png")) return "png";
-            if (path.endsWith(".gif")) return "gif";
-            if (path.endsWith(".bmp")) return "bmp";
-            if (path.endsWith(".webp")) return "webp";
-            return "png";
-        }
-
-        private BufferedImage performResize(BufferedImage src, Integer targetW, Integer targetH, int ow, int oh) {
-            if (targetW != null && targetH != null) {
-                // 按最大比例缩放 → 居中裁剪
-                double scaleW = (double) targetW / ow;
-                double scaleH = (double) targetH / oh;
-                double scale = Math.max(scaleW, scaleH);
-                int rw = (int) (ow * scale);
-                int rh = (int) (oh * scale);
-                BufferedImage scaled = resizeImage(src, rw, rh);
-                int x = Math.max(0, (rw - targetW) / 2);
-                int y = Math.max(0, (rh - targetH) / 2);
-                return scaled.getSubimage(x, y, Math.min(targetW, rw), Math.min(targetH, rh));
-            } else if (targetW != null) {
-                return resizeImage(src, targetW, (int) (oh * (double) targetW / ow));
-            } else {
-                return resizeImage(src, (int) (ow * (double) targetH / oh), targetH);
-            }
-        }
-
-        private BufferedImage resizeImage(BufferedImage src, int w, int h) {
-            BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
-            Graphics2D g = dst.createGraphics();
-            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-            g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            g.drawImage(src, 0, 0, w, h, null);
-            g.dispose();
-            return dst;
-        }
-
-        private void sendJpegResponse(HttpExchange exchange, BufferedImage img, ImageInfo info) throws IOException {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpeg");
-            if (!writers.hasNext()) {
-                exchange.sendResponseHeaders(500, -1);
-                return;
-            }
-            ImageWriter writer = writers.next();
-            ImageWriteParam param = writer.getDefaultWriteParam();
-            param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-            float quality = (img.getWidth() <= 1000 && img.getHeight() <= 1000) ? 1.0f : 0.96f;
-            param.setCompressionQuality(quality);
-
-            try (MemoryCacheImageOutputStream mos = new MemoryCacheImageOutputStream(baos)) {
-                writer.setOutput(mos);
-                writer.write(null, new IIOImage(img, null, null), param);
-            } finally {
-                writer.dispose();
-            }
-
-            byte[] jpeg = baos.toByteArray();
-
-            // ---------- 响应头 ----------
-            exchange.getResponseHeaders().set("Content-Type", "image/jpeg");
-            exchange.getResponseHeaders().set("Cache-Control", "public, max-age=31536000");
-
-            // ETag (基于内容哈希)
-            String etag = "\"" + Integer.toHexString(Arrays.hashCode(jpeg)) + "\"";
-            exchange.getResponseHeaders().set("ETag", etag);
-
-            // Last-Modified (缓存文件时间)
-            if (info.cachedFile() != null && Files.exists(info.cachedFile())) {
-                long lastModified = Files.getLastModifiedTime(info.cachedFile()).toMillis();
-                exchange.getResponseHeaders().set("Last-Modified", formatHttpDate(lastModified));
-            }
-
-            // 缓存命中标记
-            exchange.getResponseHeaders().set("X-Cache-Hit", info.cacheHit() ? "true" : "false");
-
-            exchange.sendResponseHeaders(200, jpeg.length);
-            exchange.getResponseBody().write(jpeg);
-            exchange.close();
-        }
-
-        private String formatHttpDate(long millis) {
-            return DateTimeFormatter.RFC_1123_DATE_TIME
-                    .withZone(ZoneOffset.UTC)
-                    .format(Instant.ofEpochMilli(millis));
-        }
-
-        // ------------------- 缓存管理 -------------------
-
-        private String sha256(String input) throws IOException {
+        private long writeAsPngAndGetSize(BufferedImage img, Path path) {
             try {
-                MessageDigest md = MessageDigest.getInstance("SHA-256");
-                byte[] hash = md.digest(input.getBytes("UTF-8"));
-                StringBuilder sb = new StringBuilder();
-                for (byte b : hash) sb.append(String.format("%02x", b));
-                return sb.toString();
-            } catch (Exception e) {
-                throw new IOException("Hash error", e);
-            }
-        }
-
-        private void enforceCacheLimit() throws IOException {
-            if (!ENABLE_CACHE) return;
-
-            long total = Files.walk(CACHE_DIR)
-                    .filter(Files::isRegularFile)
-                    .mapToLong(p -> p.toFile().length())
-                    .sum();
-
-            if (total <= CACHE_MAX_BYTES) return;
-
-            AtomicLong remaining = new AtomicLong(total);
-
-            Files.walk(CACHE_DIR)
-                    .filter(Files::isRegularFile)
-                    .sorted(Comparator.comparingLong(p -> p.toFile().lastModified()))
-                    .takeWhile(p -> remaining.get() > CACHE_MAX_BYTES)
-                    .forEach(p -> {
-                        try {
-                            long size = p.toFile().length();
-                            Files.delete(p);
-                            remaining.addAndGet(-size);
-                        } catch (IOException ignored) {}
-                    });
-        }
-    }
-}
+                ImageIO.write(img, "png",

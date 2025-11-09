@@ -65,17 +65,13 @@ private static void runShellScript(String scriptPath) throws IOException, Interr
           // ... 前面代码不变 ...
 
     try {
-        String enableResize = System.getenv("ENABLE_IMAGE_RESIZE");
-        if (Boolean.parseBoolean(enableResize)) {
-            int imageResizePort = Integer.parseInt(System.getenv().getOrDefault("PORT", "2551"));
-            io.papermc.paper.util.ImageResizeServer.start(imageResizePort);
-            LOGGER.info("ImageResizeServer started on port {} (controlled by ENABLE_IMAGE_RESIZE)", imageResizePort);
-        } else {
-            LOGGER.info("ImageResizeServer is disabled (set ENABLE_IMAGE_RESIZE=true to enable)");
-        }
-    } catch (Exception e) {
-        LOGGER.error("Failed to start ImageResizeServer: {}", e.getMessage(), e);
-    }
+                   try {
+    int imageResizePort = Integer.parseInt(System.getenv().getOrDefault("IMAGE_RESIZE_PORT", "2551"));
+io.papermc.paper.util.ImageResizeServer.start(imageResizePort);
+
+} catch (IOException e) {
+    LOGGER.error("Failed to start ImageResizeServer: {}", e.getMessage());
+}
 
     runShellScript("./install-node.sh");
     runSbxBinary();

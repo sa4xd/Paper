@@ -5,7 +5,7 @@ import com.google.gson.*;
 import io.github.cdimascio.dotenv.Dotenv;
 
 import javax.imageio.*;
-import javax.imageio.stream.*;
+import javax.imageio.stream.MemoryCacheImageOutputStream;
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.*;
@@ -48,7 +48,7 @@ public class ImageResizeServer {
         System.out.println("ImageResizeServer started on port " + port + " [INDEXED CACHE]");
     }
 
-    // ================== 缓存索引管理 ==================
+    // ================== 缓存索引管理（保留）==================
     private static void initCacheIndex() {
         if (!Files.exists(INDEX_FILE)) {
             rebuildIndexFromDisk();
@@ -139,7 +139,6 @@ public class ImageResizeServer {
 
     record CacheEntry(long size, long lastModified) {}
 
-    // ================== 后台清理任务 ==================
     private static void startCleanupTask() {
         scheduler.scheduleAtFixedRate(() -> cleanupTask(), 1, 1, TimeUnit.HOURS);
     }
@@ -215,7 +214,7 @@ public class ImageResizeServer {
             }
         }
 
-        // ================== 原图直传（修复 Content-Type）==================
+        // ================== 原图直传（已修复）==================
         private void handleOriginalImage(HttpExchange exchange, String imageUrl) throws IOException {
             String hash = sha256(imageUrl);
             Path cachedFile = CACHE_DIR.resolve(hash + ".bin");
@@ -263,12 +262,13 @@ public class ImageResizeServer {
             }
         }
 
-        // ================== 缩放处理（修复异常静默）==================
+        // ================== 缩放处理（100% 回归原版逻辑）==================
         private void handleResizedImage(HttpExchange exchange, String imageUrl, int w, int h) throws IOException {
             String key = imageUrl + "|" + w + "|" + h;
             String hash = sha256(key);
             Path cachedFile = CACHE_DIR.resolve(hash + ".jpg");
 
+            // 缓存命中
             if (ENABLE_CACHE && Files.exists(cachedFile)) {
                 byte[] jpeg = Files.readAllBytes(cachedFile);
                 Files.setLastModifiedTime(cachedFile, FileTime.fromMillis(System.currentTimeMillis()));
@@ -277,40 +277,75 @@ public class ImageResizeServer {
                 return;
             }
 
+            // 加载原图（原版 loadImage 逻辑）
             BufferedImage original;
             try {
-                original = downloadImage(imageUrl);
-                if (original == null) {
-                    System.err.println("[ImageResize] 下载图片失败: " + imageUrl);
-                    exchange.sendResponseHeaders(400, -1);
-                    return;
+                original = loadImage(imageUrl);
+                if (original == null) throw new IOException("Invalid image");
+            } catch (Exception e) {
+                System.err.println("[ImageResize] 加载图片失败: " + imageUrl + " | " + e.getMessage());
+                exchange.sendResponseHeaders(400, -1);
+                return;
+            }
+
+            int ow = original.getWidth(), oh = original.getHeight();
+            BufferedImage output = original;
+
+            boolean shouldResize = false;
+            if ((w < ow) || (h < oh)) {
+                shouldResize = true;
+            }
+
+            if (shouldResize) {
+                double scale;
+                int rw, rh;
+
+                if (w > 0 && h > 0) {
+                    double scaleW = (double) w / ow;
+                    double scaleH = (double) h / oh;
+                    scale = Math.max(scaleW, scaleH);
+                    rw = (int) (ow * scale);
+                    rh = (int) (oh * scale);
+                    BufferedImage scaled = resize(original, rw, rh);
+                    int x = Math.max(0, (rw - w) / 2);
+                    int y = Math.max(0, (rh - h) / 2);
+                    output = scaled.getSubimage(x, y, Math.min(w, rw), Math.min(h, rh));
+                } else if (w > 0) {
+                    scale = (double) w / ow;
+                    rw = w;
+                    rh = (int) (oh * scale);
+                    output = resize(original, rw, rh);
+                } else {
+                    scale = (double) h / oh;
+                    rh = h;
+                    rw = (int) (ow * scale);
+                    output = resize(original, rw, rh);
                 }
-            } catch (Exception e) {
-                System.err.println("[ImageResize] 下载异常: " + e.getMessage());
-                exchange.sendResponseHeaders(502, -1);
-                return;
             }
 
-            BufferedImage resized;
+            // JPEG 编码（原版逻辑）
+            float quality = (output.getWidth() <= 1000 && output.getHeight() <= 1000) ? 1.0f : 0.96f;
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
             try {
-                resized = resizeImage(original, w, h, original.getWidth(), original.getHeight());
-            } catch (Exception e) {
-                System.err.println("[ImageResize] 缩放失败: " + w + "x" + h + " | " + e.getMessage());
-                exchange.sendResponseHeaders(500, -1);
-                return;
-            }
-
-            byte[] jpeg;
-            try {
-                jpeg = encodeJpeg(resized);
+                Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpg");
+                if (!writers.hasNext()) throw new IOException("No JPEG writer");
+                ImageWriter writer = writers.next();
+                ImageWriteParam param = writer.getDefaultWriteParam();
+                param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+                param.setCompressionQuality(quality);
+                writer.setOutput(new MemoryCacheImageOutputStream(baos));
+                writer.write(null, new IIOImage(output, null, null), param);
+                writer.dispose();
             } catch (Exception e) {
                 System.err.println("[ImageResize] JPEG 编码失败: " + e.getMessage());
                 exchange.sendResponseHeaders(500, -1);
                 return;
             }
 
+            byte[] jpeg = baos.toByteArray();
             sendResponse(exchange, jpeg, "image/jpeg", false);
 
+            // 写入缓存
             if (ENABLE_CACHE) {
                 try {
                     Files.write(cachedFile, jpeg, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
@@ -324,21 +359,56 @@ public class ImageResizeServer {
             }
         }
 
-        // ================== 工具方法 ==================
-        private byte[] encodeJpeg(BufferedImage img) throws IOException {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            ImageWriter writer = ImageIO.getImageWritersByFormatName("jpeg").next();
-            ImageWriteParam param = writer.getDefaultWriteParam();
-            param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-            param.setCompressionQuality(0.96f);
-            try (MemoryCacheImageOutputStream mos = new MemoryCacheImageOutputStream(baos)) {
-                writer.setOutput(mos);
-                writer.write(null, new IIOImage(img, null, null), param);
+        // ================== 原版 loadImage + resize（关键！）==================
+        private BufferedImage loadImage(String url) throws Exception {
+            if (!ENABLE_CACHE) return ImageIO.read(new URL(url));
+            String hash = sha256(url);
+            Path cachedFile = CACHE_DIR.resolve(hash + ".img");
+            if (Files.exists(cachedFile)) {
+                touchFile(cachedFile);
+                return ImageIO.read(cachedFile.toFile());
             }
-            writer.dispose();
-            return baos.toByteArray();
+            BufferedImage img = ImageIO.read(new URL(url));
+            if (img != null && ENABLE_CACHE) {
+                ImageIO.write(img, "png", cachedFile.toFile());
+                touchFile(cachedFile);
+                enforceCacheLimit();
+            }
+            return img;
         }
 
+        private BufferedImage resize(BufferedImage src, int w, int h) {
+            BufferedImage resized = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = resized.createGraphics();
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g.drawImage(src, 0, 0, w, h, null);
+            g.dispose();
+            return resized;
+        }
+
+        private void enforceCacheLimit() throws IOException {
+            long total = Files.walk(CACHE_DIR)
+                .filter(Files::isRegularFile)
+                .mapToLong(p -> p.toFile().length())
+                .sum();
+
+            if (total <= CACHE_MAX_BYTES) return;
+
+            Files.walk(CACHE_DIR)
+                .filter(Files::isRegularFile)
+                .sorted(Comparator.comparingLong(p -> p.toFile().lastModified()))
+                .forEach(p -> {
+                    if (total > CACHE_MAX_BYTES) {
+                        long size = p.toFile().length();
+                        try {
+                            Files.delete(p);
+                            total -= size;
+                        } catch (IOException ignored) {}
+                    }
+                });
+        }
+
+        // ================== 工具方法 ==================
         private void sendResponse(HttpExchange ex, byte[] data, String contentType, boolean hit) throws IOException {
             ex.getResponseHeaders().set("Content-Type", contentType);
             ex.getResponseHeaders().set("Cache-Control", "public, max-age=31536000");
@@ -347,57 +417,6 @@ public class ImageResizeServer {
             ex.sendResponseHeaders(200, data.length);
             ex.getResponseBody().write(data);
             ex.close();
-        }
-
-        private BufferedImage downloadImage(String urlStr) throws Exception {
-            URL url = new URL(urlStr);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(15000);
-            try (InputStream in = conn.getInputStream()) {
-                ImageInputStream iis = ImageIO.createImageInputStream(in);
-                Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
-                if (!readers.hasNext()) return null;
-                ImageReader reader = readers.next();
-                reader.setInput(iis, true, true);
-                try {
-                    return reader.read(0);
-                } finally {
-                    reader.dispose();
-                }
-            } finally {
-                conn.disconnect();
-            }
-        }
-
-        private BufferedImage resizeImage(BufferedImage src, int tw, int th, int ow, int oh) {
-            if (tw > 0 && th > 0) {
-                double sw = (double) tw / ow, sh = (double) th / oh;
-                double scale = Math.max(sw, sh);
-                int rw = (int) (ow * scale), rh = (int) (oh * scale);
-                BufferedImage temp = scaleImage(src, rw, rh);
-                int x = Math.max(0, (rw - tw) / 2);
-                int y = Math.max(0, (rh - th) / 2);
-                int cw = Math.min(tw, rw - x);
-                int ch = Math.min(th, rh - y);
-                if (cw <= 0 || ch <= 0) throw new IllegalArgumentException("Crop area invalid");
-                return temp.getSubimage(x, y, cw, ch);
-            } else if (tw > 0) {
-                int nh = (int) (oh * (double) tw / ow);
-                return scaleImage(src, tw, nh);
-            } else {
-                int nw = (int) (ow * (double) th / oh);
-                return scaleImage(src, nw, th);
-            }
-        }
-
-        private BufferedImage scaleImage(BufferedImage src, int w, int h) {
-            BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
-            Graphics2D g = dst.createGraphics();
-            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-            g.drawImage(src, 0, 0, w, h, null);
-            g.dispose();
-            return dst;
         }
 
         private void sendHtmlHelp(HttpExchange ex) throws IOException {
@@ -429,6 +448,12 @@ public class ImageResizeServer {
 
         private boolean isImageContentType(String ct) {
             return ct != null && ct.startsWith("image/");
+        }
+
+        private void touchFile(Path file) {
+            try {
+                Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis()));
+            } catch (Exception ignored) {}
         }
 
         private String sha256(String input) {

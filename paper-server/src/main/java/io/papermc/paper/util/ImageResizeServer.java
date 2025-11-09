@@ -7,8 +7,11 @@ import javax.imageio.ImageIO;
 import javax.imageio.ImageWriteParam;
 import javax.imageio.ImageWriter;
 import javax.imageio.stream.MemoryCacheImageOutputStream;
-import java.awt.*;
+
 import java.awt.image.BufferedImage;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+
 import java.io.*;
 import java.net.*;
 import java.nio.file.*;
@@ -231,24 +234,25 @@ public class ImageResizeServer {
             exchange.getResponseBody().close();
         }
 
-        private boolean checkNotModified(HttpExchange exchange, String etag, Path cachedFile) {
-            if (!ENABLE_CACHE) return false;
+private boolean checkNotModified(HttpExchange exchange, String etag, Path cachedFile) {
+    if (!ENABLE_CACHE) return false;
 
-            List<String> ifNoneMatch = exchange.getRequestHeaders().get("If-None-Match");
-            if (ifNoneMatch != null && ifNoneMatch.stream().anyMatch(h -> h.equals(etag) || h.equals("*"))) {
-                return true;
-            }
+    // 显式使用 java.util.List
+    java.util.List<String> ifNoneMatch = exchange.getRequestHeaders().get("If-None-Match");
+    if (ifNoneMatch != null && ifNoneMatch.stream().anyMatch(h -> h.equals(etag) || h.equals("*"))) {
+        return true;
+    }
 
-            List<String> ifModifiedSince = exchange.getRequestHeaders().get("If-Modified-Since");
-            if (ifModifiedSince != null && !ifModifiedSince.isEmpty() && cachedFile != null && Files.exists(cachedFile)) {
-                try {
-                    long fileTime = Files.getLastModifiedTime(cachedFile).toMillis();
-                    long sinceTime = HTTP_DATE_FORMAT.parse(ifModifiedSince.get(0)).getTime();
-                    return fileTime <= sinceTime;
-                } catch (ParseException | IOException ignored) {}
-            }
-            return false;
-        }
+    java.util.List<String> ifModifiedSince = exchange.getRequestHeaders().get("If-Modified-Since");
+    if (ifModifiedSince != null && !ifModifiedSince.isEmpty() && cachedFile != null && Files.exists(cachedFile)) {
+        try {
+            long fileTime = Files.getLastModifiedTime(cachedFile).toMillis();
+            long sinceTime = HTTP_DATE_FORMAT.parse(ifModifiedSince.get(0)).getTime();
+            return fileTime <= sinceTime;
+        } catch (ParseException | IOException ignored) {}
+    }
+    return false;
+}
 
         private long getFileTime(Path file) {
             if (file != null && Files.exists(file)) {

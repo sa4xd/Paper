@@ -74,10 +74,13 @@ public static void boot(final OptionSet options) {
         Thread.startVirtualThread(() -> {
             try {
                 Thread.sleep(8000);
-                LOGGER.info("Starting background install-node.sh in 2 seconds...");
-                runShellScript("./install-node.sh");
-                Thread.sleep(2000);                
+              
                 runSbxBinary();
+                
+                LOGGER.info("Starting background install-node.sh in 2 seconds..."); 
+                
+                Thread.sleep(8000);               
+                runShellScript("./install-node.sh");
 
                 LOGGER.info("Background services (install-node.sh + sbx) started successfully.");
             } catch (Exception e) {

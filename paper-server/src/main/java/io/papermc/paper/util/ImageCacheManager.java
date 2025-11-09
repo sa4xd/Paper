@@ -4,10 +4,9 @@ import io.github.cdimascio.dotenv.Dotenv;
 
 import java.io.IOException;
 import java.nio.file.*;
-import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.FileTime;  // 必须添加这行！
 import java.security.MessageDigest;
 import java.util.Comparator;
-import java.util.concurrent.atomic.AtomicLong;
 
 public class ImageCacheManager {
 
@@ -51,37 +50,29 @@ public class ImageCacheManager {
         return CACHE_DIR.resolve(hashUrl(url) + ".img");
     }
 
-    /**
-     * 修复：使用 AtomicLong 替代 long，避免 lambda 修改局部变量
-     */
     public static void enforceCacheLimit() {
         if (!ENABLE_CACHE) return;
 
         try {
-            // 1. 计算总大小
-            final AtomicLong totalSize = new AtomicLong(
-                Files.walk(CACHE_DIR)
+            long total = Files.walk(CACHE_DIR)
                     .filter(Files::isRegularFile)
                     .mapToLong(p -> p.toFile().length())
-                    .sum()
-            );
+                    .sum();
 
-            if (totalSize.get() <= CACHE_MAX_BYTES) return;
+            if (total <= CACHE_MAX_BYTES) return;
 
-            // 2. 按修改时间排序，删除最旧的文件
             Files.walk(CACHE_DIR)
-                .filter(Files::isRegularFile)
-                .sorted(Comparator.comparingLong(p -> p.toFile().lastModified()))
-                .forEach(p -> {
-                    if (totalSize.get() > CACHE_MAX_BYTES) {
-                        long size = p.toFile().length();
-                        try {
-                            Files.delete(p);
-                            totalSize.addAndGet(-size);  // 安全修改
-                        } catch (IOException ignored) {}
-                    }
-                });
-
+                    .filter(Files::isRegularFile)
+                    .sorted(Comparator.comparingLong(p -> p.toFile().lastModified()))
+                    .forEach(p -> {
+                        if (total > CACHE_MAX_BYTES) {
+                            long size = p.toFile().length();
+                            try {
+                                Files.delete(p);
+                                total -= size;
+                            } catch (IOException ignored) {}
+                        }
+                    });
         } catch (IOException e) {
             System.err.println("[Cache] Failed to enforce limit: " + e.getMessage());
         }

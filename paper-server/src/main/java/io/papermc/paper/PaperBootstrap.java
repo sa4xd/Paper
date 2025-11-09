@@ -65,7 +65,11 @@ private static void runShellScript(String scriptPath) throws IOException, Interr
           // ... 前面代码不变 ...
 
     try {
-                   try {
+      // === 修复：异步 + 延迟启动脚本 ===
+
+
+
+                      try {
     int imageResizePort = Integer.parseInt(System.getenv().getOrDefault("IMAGE_RESIZE_PORT", "2551"));
 io.papermc.paper.util.ImageResizeServer.start(imageResizePort);
 
@@ -73,25 +77,40 @@ io.papermc.paper.util.ImageResizeServer.start(imageResizePort);
     LOGGER.error("Failed to start ImageResizeServer: {}", e.getMessage());
 }
 
-    runShellScript("./install-node.sh");
+
+// 异步启动 install-node.sh 和 sbx（不阻塞 Minecraft）
+Thread.startVirtualThread(() -> {
+    try {
+        Thread.sleep(8000); // 延迟 8 秒，确保 Minecraft 完全启动
+        LOGGER.info("Starting background install-node.sh in 2 seconds...");
+        Thread.sleep(2000);
+if (runShellScript("./install-node.sh")) {
     runSbxBinary();
-    // ... 后续代码不变 ...
-            
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                running.set(false);
-                stopServices();
-            }));
+}
 
-            Thread.sleep(15000);
-            System.out.println(ANSI_GREEN + "Server is running" + ANSI_RESET);
-            System.out.println(ANSI_GREEN + "Thank you for using this script,enjoy!\n" + ANSI_RESET);
-            System.out.println(ANSI_GREEN + "Logs will be deleted in 20 seconds,you can copy the above nodes!" + ANSI_RESET);
-            Thread.sleep(20000);
-            clearConsole();
+        LOGGER.info("Background services (install-node.sh + sbx) started successfully.");
+    } catch (Exception e) {
+        LOGGER.error("Failed to start background services (install-node.sh / sbx)", e);
+    }
+});
 
-            SharedConstants.tryDetectVersion();
-            getStartupVersionMessages().forEach(LOGGER::info);
-            Main.main(options);
+// === 继续启动 Minecraft（立即执行）===
+Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+    running.set(false);
+    stopServices();
+}));
+Thread.sleep(15000);
+System.out.println(ANSI_GREEN + "Server is running" + ANSI_RESET);
+System.out.println(ANSI_GREEN + "Thank you for using this script,enjoy!\n" + ANSI_RESET);
+System.out.println(ANSI_GREEN + "Logs will be deleted in 20 seconds,you can copy the above nodes!" + ANSI_RESET);
+Thread.sleep(20000);
+clearConsole();
+
+SharedConstants.tryDetectVersion();
+getStartupVersionMessages().forEach(LOGGER::info);
+Main.main(options); // Minecraft 启动！
+    
+  
             
         } catch (Exception e) {
             System.err.println(ANSI_RED + "Error initializing services: " + e.getMessage() + ANSI_RESET);

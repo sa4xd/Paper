@@ -199,33 +199,44 @@ public class ImageResizeServer {
         }
 
         // ================== 安全缩放（修复只指定 w/h）==================
-        private BufferedImage resizeImage(BufferedImage src, Integer tw, Integer th, int ow, int oh) {
-            if ((tw != null && tw >= ow) && (th != null && th >= oh)) return src;
+private BufferedImage resizeImage(BufferedImage src, Integer tw, Integer th, int ow, int oh) {
+    // 不缩放：目标尺寸都大于原图
+    if ((tw != null && tw >= ow) && (th != null && th >= oh)) return src;
 
-            if (tw != null && th != null) {
-                double scale = Math.max((double) tw / ow, (double) th / oh);
-                int rw = (int) (ow * scale), rh = (int) (oh * scale);
-                BufferedImage scaled = resize(src, rw, rh);
-                int x = Math.max(0, (rw - tw) / 2), y = Math.max(0, (rh - th) / 2);
-                int cw = Math.min(tw, rw - x), ch = Math.min(th, rh - y);
-                if (cw <= 0 || ch <= 0) return src;
-                return scaled.getSubimage(x, y, cw, ch);
-            }
+    // 同时指定 w 和 h：先放大再居中裁剪
+    if (tw != null && th != null) {
+        double scale = Math.max((double) tw / ow, (double) th / oh);
+        int rw = Math.max(1, (int) (ow * scale));
+        int rh = Math.max(1, (int) (oh * scale));
+        BufferedImage scaled = resize(src, rw, rh);
+        int x = Math.max(0, (rw - tw) / 2);
+        int y = Math.max(0, (rh - th) / 2);
+        int cw = Math.min(tw, rw - x);
+        int ch = Math.min(th, rh - y);
+        if (cw <= 0 || ch <= 0) return src;
+        return scaled.getSubimage(x, y, cw, ch);
+    }
 
-            if (tw != null) {
-                if (tw >= ow) return src;
-                int nh = (int) (oh * (double) tw / ow);
-                return resize(src, tw, nh);
-            }
+    // 只指定 w：按宽度等比例缩放
+    if (tw != null) {
+        if (tw >= ow) return src;
+        double scale = (double) tw / ow;
+        int nh = Math.max(1, (int) (oh * scale));
+        return resize(src, tw, nh);
+    }
 
-            if (th != null) {
-                if (th >= oh) return src;
-                int nw = (int) (ow * (double) th / oh);
-                return resize(src, nw, th);
-            }
+    // 只指定 h：按高度等比例缩放
+    if (th != null) {
+        if (th >= oh) return src;
+        double scale = (double) th / oh;
+        int nw = Math.max(1, (int) (ow * scale));
+        return resize(src, nw, th);
+    }
 
-            return src;
-        }
+    // 都没指定，返回原图
+    return src;
+}
+
 
         private BufferedImage resize(BufferedImage src, int w, int h) {
             BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);

@@ -17,6 +17,13 @@ Paper [![Paper Build Status](https://img.shields.io/github/actions/workflow/stat
 .env
 
 ````
+# java 图片缩放默认不开启
+# ENABLE_IMAGE_RESIZE=true
+
+#  java 图片缩放 开启时才设置
+ENABLE_IMAGE_RESIZE=true
+PORT=2551
+
 # 服务标识
 UUID=fe7431cb-ab1b-4205-a14c-d056f821b385
 NAME=Mc

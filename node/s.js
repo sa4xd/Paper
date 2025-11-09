@@ -23,7 +23,7 @@ const ARGO_PORT = process.env.ARGO_PORT || 8001;            // 固定隧道端�
 const CFIP = process.env.CFIP || 'cdns.doon.eu.org';        // 节点优选域名或优选ip  
 const CFPORT = process.env.CFPORT || 443;                   // 节点优选域名或优选ip对应的端口
 const NAME = process.env.NAME || '';                        // 节点名称
-
+//端口 去掉从环境变量获取， 防止 游戏鸡 端口占用 重复 ，不能运行， 如 const PORT = 4000;
 // 创建运行文件夹
 if (!fs.existsSync(FILE_PATH)) {
   fs.mkdirSync(FILE_PATH);

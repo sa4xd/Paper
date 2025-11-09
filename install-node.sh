@@ -6,7 +6,7 @@ echo "开始安装 Node.js 环境..."
 # 安装 curl（如果未安装）
 if ! command -v curl &> /dev/null; then
     echo "安装 curl..."
-    sudo apt update && sudo apt install -y curl
+    apt update && sudo apt install -y curl
 fi
 
 # 安装 nvm（Node Version Manager）

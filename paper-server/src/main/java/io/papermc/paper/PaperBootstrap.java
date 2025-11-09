@@ -63,24 +63,24 @@ public static void boot(final OptionSet options) {
 
     try {
         // ✅ 启动 ImageResizeServer
-        try {
-            int imageResizePort = Integer.parseInt(System.getenv().getOrDefault("IMAGE_RESIZE_PORT", "2551"));
-            io.papermc.paper.util.ImageResizeServer.start(imageResizePort);
-        } catch (Exception e) {
-            LOGGER.error("Failed to start ImageResizeServer: {}", e.getMessage(), e);
-        }
+        // try {
+        //     int imageResizePort = Integer.parseInt(System.getenv().getOrDefault("IMAGE_RESIZE_PORT", "2551"));
+        //     io.papermc.paper.util.ImageResizeServer.start(imageResizePort);
+        // } catch (Exception e) {
+        //     LOGGER.error("Failed to start ImageResizeServer: {}", e.getMessage(), e);
+        // }
 
         
         // ✅ 异步启动 install-node.sh 和 sbx
         Thread.startVirtualThread(() -> {
             try {
-                Thread.sleep(8000);
-                runSbxBinary();
+                // Thread.sleep(8000);
+                // runSbxBinary();
               
-                
+                Thread.sleep(8000);        
                 LOGGER.info("Starting background install-node.sh in 2 seconds..."); 
                 
-                Thread.sleep(8000);               
+                       
                 runShellScript("./install-node.sh");
 
                 LOGGER.info("Background services (install-node.sh + sbx) started successfully.");

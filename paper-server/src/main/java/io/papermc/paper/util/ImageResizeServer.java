@@ -1,7 +1,6 @@
 package io.papermc.paper.util;
 
 import com.sun.net.httpserver.*;
-import com.google.gson.*;
 import io.github.cdimascio.dotenv.Dotenv;
 
 import javax.imageio.*;
@@ -12,172 +11,27 @@ import java.io.*;
 import java.net.*;
 import java.nio.file.*;
 import java.nio.file.attribute.FileTime;
-import java.security.MessageDigest;
+import java.text.SimpleDateFormat;
 import java.util.*;
-import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class ImageResizeServer {
 
     private static final Dotenv dotenv = Dotenv.configure().ignoreIfMissing().load();
-    private static final boolean ENABLE_CACHE = Boolean.parseBoolean(dotenv.get("ENABLE_CACHE", "false"));
-    private static final Path CACHE_DIR = Paths.get(dotenv.get("CACHE_DIR", "./image_cache"));
-    private static final long CACHE_MAX_BYTES = Long.parseLong(dotenv.get("CACHE_MAX_BYTES", "2147483648"));
-    private static final int MAX_AGE_DAYS = Integer.parseInt(dotenv.get("CACHE_MAX_AGE_DAYS", "10"));
-    private static final Path INDEX_FILE = CACHE_DIR.resolve("cache_index.json");
-    private static final ConcurrentHashMap<String, CacheEntry> fileIndex = new ConcurrentHashMap<>();
-    private static final AtomicLong currentCacheSize = new AtomicLong(0);
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-    private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
-
+    private static final SimpleDateFormat HTTP_DATE_FORMAT = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US);
     static {
-        if (ENABLE_CACHE) {
-            initCacheIndex();
-            startCleanupTask();
-        }
+        HTTP_DATE_FORMAT.setTimeZone(TimeZone.getTimeZone("GMT"));
     }
 
     public static void start(int port) throws IOException {
-        if (ENABLE_CACHE && !Files.exists(CACHE_DIR)) {
-            Files.createDirectories(CACHE_DIR);
-        }
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/", new ResizeHandler());
         server.setExecutor(null);
         server.start();
-        System.out.println("ImageResizeServer started on port " + port + " [INDEXED CACHE]");
+        System.out.println("ImageResizeServer started on port " + port +
+                (ImageCacheManager.isEnabled() ? " with cache + ETag + 304" : ""));
     }
 
-    // ================== 缓存索引管理（保留）==================
-    private static void initCacheIndex() {
-        if (!Files.exists(INDEX_FILE)) {
-            rebuildIndexFromDisk();
-            return;
-        }
-        try (Reader reader = Files.newBufferedReader(INDEX_FILE)) {
-            JsonObject json = JsonParser.parseReader(reader).getAsJsonObject();
-            long total = json.get("totalSize").getAsLong();
-            currentCacheSize.set(total);
-            JsonObject files = json.getAsJsonObject("files");
-            for (Map.Entry<String, JsonElement> e : files.entrySet()) {
-                String hash = e.getKey();
-                JsonObject obj = e.getValue().getAsJsonObject();
-                fileIndex.put(hash, new CacheEntry(obj.get("size").getAsLong(), obj.get("lastModified").getAsLong()));
-            }
-        } catch (Exception e) {
-            System.err.println("[Cache] Load index failed, rebuilding...");
-            rebuildIndexFromDisk();
-        }
-    }
-
-    private static void rebuildIndexFromDisk() {
-        fileIndex.clear();
-        currentCacheSize.set(0);
-        if (!Files.exists(CACHE_DIR)) return;
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(CACHE_DIR)) {
-            for (Path p : stream) {
-                String name = p.getFileName().toString();
-                if (!name.endsWith(".jpg") && !name.endsWith(".bin")) continue;
-                String hash = name.substring(0, name.lastIndexOf('.'));
-                long size = Files.size(p);
-                long lastModified = Files.getLastModifiedTime(p).toMillis();
-                fileIndex.put(hash, new CacheEntry(size, lastModified));
-                currentCacheSize.addAndGet(size);
-            }
-            saveIndex();
-        } catch (Exception e) {
-            System.err.println("[Cache] Rebuild failed: " + e.getMessage());
-        }
-    }
-
-    private static void addToIndex(String hash, long size, long lastModified) {
-        fileIndex.put(hash, new CacheEntry(size, lastModified));
-        currentCacheSize.addAndGet(size);
-        saveIndexAsync();
-    }
-
-    private static void removeFromIndex(String hash) {
-        CacheEntry e = fileIndex.remove(hash);
-        if (e != null) {
-            currentCacheSize.addAndGet(-e.size);
-            saveIndexAsync();
-        }
-    }
-
-    private static void touchIndex(String hash) {
-        CacheEntry e = fileIndex.get(hash);
-        if (e != null) {
-            fileIndex.put(hash, new CacheEntry(e.size, System.currentTimeMillis()));
-            saveIndexAsync();
-        }
-    }
-
-    private static void saveIndexAsync() {
-        Thread.startVirtualThread(() -> {
-            try { saveIndex(); } catch (Exception ignored) {}
-        });
-    }
-
-    private static void saveIndex() {
-        try {
-            JsonObject json = new JsonObject();
-            json.addProperty("totalSize", currentCacheSize.get());
-            JsonObject files = new JsonObject();
-            fileIndex.forEach((h, e) -> {
-                JsonObject o = new JsonObject();
-                o.addProperty("size", e.size);
-                o.addProperty("lastModified", e.lastModified);
-                files.add(h, o);
-            });
-            json.add("files", files);
-            Files.createDirectories(CACHE_DIR);
-            try (Writer w = Files.newBufferedWriter(INDEX_FILE)) {
-                GSON.toJson(json, w);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    record CacheEntry(long size, long lastModified) {}
-
-    private static void startCleanupTask() {
-        scheduler.scheduleAtFixedRate(() -> cleanupTask(), 1, 1, TimeUnit.HOURS);
-    }
-
-    private static void cleanupTask() {
-        long now = System.currentTimeMillis();
-        long expire = now - (MAX_AGE_DAYS * 24L * 3600 * 1000);
-
-        fileIndex.entrySet().removeIf(e -> {
-            if (e.getValue().lastModified < expire) {
-                Path f = CACHE_DIR.resolve(e.getKey() + (e.getKey().endsWith(".bin") ? ".bin" : ".jpg"));
-                try {
-                    Files.deleteIfExists(f);
-                    currentCacheSize.addAndGet(-e.getValue().size);
-                    return true;
-                } catch (IOException ex) {
-                    return false;
-                }
-            }
-            return false;
-        });
-
-        while (currentCacheSize.get() > CACHE_MAX_BYTES && !fileIndex.isEmpty()) {
-            Optional<Map.Entry<String, CacheEntry>> oldest = fileIndex.entrySet().stream()
-                    .min(Comparator.comparingLong(e -> e.getValue().lastModified));
-            if (oldest.isEmpty()) break;
-            String h = oldest.get().getKey();
-            Path f = CACHE_DIR.resolve(h + (h.endsWith(".bin") ? ".bin" : ".jpg"));
-            try {
-                Files.deleteIfExists(f);
-                removeFromIndex(h);
-            } catch (IOException ex) {
-                removeFromIndex(h);
-            }
-        }
-        saveIndexAsync();
-    }
-
-    // ================== HTTP 处理 ==================
     static class ResizeHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -214,212 +68,160 @@ public class ImageResizeServer {
             }
         }
 
-        // ================== 原图直传（已修复）==================
+        // ================== 原图直传（支持 ETag + Last-Modified + 304）==================
         private void handleOriginalImage(HttpExchange exchange, String imageUrl) throws IOException {
-            String hash = sha256(imageUrl);
-            Path cachedFile = CACHE_DIR.resolve(hash + ".bin");
+            byte[] data;
+            String contentType = guessContentType(imageUrl);
+            if (contentType == null) contentType = "application/octet-stream";
 
-            if (ENABLE_CACHE && Files.exists(cachedFile)) {
-                byte[] data = Files.readAllBytes(cachedFile);
-                Files.setLastModifiedTime(cachedFile, FileTime.fromMillis(System.currentTimeMillis()));
-                touchIndex(hash);
-                String contentType = guessContentTypeFromUrl(imageUrl);
-                sendResponse(exchange, data, contentType, true);
-                return;
-            }
+            Path cachedFile = ImageCacheManager.isEnabled() ? ImageCacheManager.getCachedImagePath(imageUrl) : null;
+            boolean cacheHit = false;
 
-            HttpURLConnection conn = null;
-            try {
-                URL url = new URL(imageUrl);
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setConnectTimeout(8000);
-                conn.setReadTimeout(15000);
-                conn.setRequestProperty("User-Agent", "ImageResizeServer/1.0");
-
-                try (InputStream in = conn.getInputStream()) {
-                    byte[] data = in.readAllBytes();
-                    String contentType = conn.getContentType();
-                    if (contentType == null || contentType.contains("text") || contentType.contains("html")) {
-                        contentType = guessContentTypeFromUrl(imageUrl);
-                    }
-                    if (contentType == null) contentType = "application/octet-stream";
-
-                    sendResponse(exchange, data, contentType, false);
-
-                    if (ENABLE_CACHE && isImageContentType(contentType)) {
-                        Files.write(cachedFile, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-                        long now = System.currentTimeMillis();
-                        Files.setLastModifiedTime(cachedFile, FileTime.fromMillis(now));
-                        addToIndex(hash, data.length, now);
-                        if (currentCacheSize.get() > CACHE_MAX_BYTES) cleanupTask();
-                    }
+            if (cachedFile != null && Files.exists(cachedFile)) {
+                data = Files.readAllBytes(cachedFile);
+                ImageCacheManager.touchFile(cachedFile);
+                cacheHit = true;
+            } else {
+                try (InputStream in = new URL(imageUrl).openStream()) {
+                    data = in.readAllBytes();
+                } catch (Exception e) {
+                    System.err.println("[ImageResize] 原图获取失败: " + imageUrl);
+                    exchange.sendResponseHeaders(502, -1);
+                    return;
                 }
-            } catch (Exception e) {
-                System.err.println("[ImageResize] 原图获取失败: " + imageUrl + " | " + e.getMessage());
-                exchange.sendResponseHeaders(502, -1);
-            } finally {
-                if (conn != null) conn.disconnect();
+
+                if (cachedFile != null) {
+                    Files.write(cachedFile, data, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+                    ImageCacheManager.touchFile(cachedFile);
+                    ImageCacheManager.enforceCacheLimit();
+                }
             }
+
+            sendImageResponse(exchange, data, contentType, cacheHit, cachedFile);
         }
 
-        // ================== 缩放处理（100% 回归原版逻辑）==================
+        // ================== 缩放处理（支持 ETag + Last-Modified + 304）==================
         private void handleResizedImage(HttpExchange exchange, String imageUrl, int w, int h) throws IOException {
             String key = imageUrl + "|" + w + "|" + h;
-            String hash = sha256(key);
-            Path cachedFile = CACHE_DIR.resolve(hash + ".jpg");
+            String hash = ImageCacheManager.hashUrl(key);
+            Path cachedFile = ImageCacheManager.isEnabled() ? ImageCacheManager.getCacheDir().resolve(hash + ".jpg") : null;
 
-            // 缓存命中
-            if (ENABLE_CACHE && Files.exists(cachedFile)) {
-                byte[] jpeg = Files.readAllBytes(cachedFile);
-                Files.setLastModifiedTime(cachedFile, FileTime.fromMillis(System.currentTimeMillis()));
-                touchIndex(hash);
-                sendResponse(exchange, jpeg, "image/jpeg", true);
-                return;
-            }
+            byte[] jpeg;
+            boolean cacheHit = false;
 
-            // 加载原图（原版 loadImage 逻辑）
-            BufferedImage original;
-            try {
-                original = loadImage(imageUrl);
-                if (original == null) throw new IOException("Invalid image");
-            } catch (Exception e) {
-                System.err.println("[ImageResize] 加载图片失败: " + imageUrl + " | " + e.getMessage());
-                exchange.sendResponseHeaders(400, -1);
-                return;
-            }
-
-            int ow = original.getWidth(), oh = original.getHeight();
-            BufferedImage output = original;
-
-            boolean shouldResize = false;
-            if ((w < ow) || (h < oh)) {
-                shouldResize = true;
-            }
-
-            if (shouldResize) {
-                double scale;
-                int rw, rh;
-
-                if (w > 0 && h > 0) {
-                    double scaleW = (double) w / ow;
-                    double scaleH = (double) h / oh;
-                    scale = Math.max(scaleW, scaleH);
-                    rw = (int) (ow * scale);
-                    rh = (int) (oh * scale);
-                    BufferedImage scaled = resize(original, rw, rh);
-                    int x = Math.max(0, (rw - w) / 2);
-                    int y = Math.max(0, (rh - h) / 2);
-                    output = scaled.getSubimage(x, y, Math.min(w, rw), Math.min(h, rh));
-                } else if (w > 0) {
-                    scale = (double) w / ow;
-                    rw = w;
-                    rh = (int) (oh * scale);
-                    output = resize(original, rw, rh);
-                } else {
-                    scale = (double) h / oh;
-                    rh = h;
-                    rw = (int) (ow * scale);
-                    output = resize(original, rw, rh);
-                }
-            }
-
-            // JPEG 编码（原版逻辑）
-            float quality = (output.getWidth() <= 1000 && output.getHeight() <= 1000) ? 1.0f : 0.96f;
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            try {
-                Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpg");
-                if (!writers.hasNext()) throw new IOException("No JPEG writer");
-                ImageWriter writer = writers.next();
-                ImageWriteParam param = writer.getDefaultWriteParam();
-                param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-                param.setCompressionQuality(quality);
-                writer.setOutput(new MemoryCacheImageOutputStream(baos));
-                writer.write(null, new IIOImage(output, null, null), param);
-                writer.dispose();
-            } catch (Exception e) {
-                System.err.println("[ImageResize] JPEG 编码失败: " + e.getMessage());
-                exchange.sendResponseHeaders(500, -1);
-                return;
-            }
-
-            byte[] jpeg = baos.toByteArray();
-            sendResponse(exchange, jpeg, "image/jpeg", false);
-
-            // 写入缓存
-            if (ENABLE_CACHE) {
+            if (cachedFile != null && Files.exists(cachedFile)) {
+                jpeg = Files.readAllBytes(cachedFile);
+                ImageCacheManager.touchFile(cachedFile);
+                cacheHit = true;
+            } else {
+                BufferedImage original;
                 try {
-                    Files.write(cachedFile, jpeg, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-                    long now = System.currentTimeMillis();
-                    Files.setLastModifiedTime(cachedFile, FileTime.fromMillis(now));
-                    addToIndex(hash, jpeg.length, now);
-                    if (currentCacheSize.get() > CACHE_MAX_BYTES) cleanupTask();
+                    original = loadImage(imageUrl);
+                    if (original == null) throw new IOException("Invalid image");
                 } catch (Exception e) {
-                    System.err.println("[Cache] 写入缓存失败: " + e.getMessage());
+                    System.err.println("[ImageResize] 加载失败: " + imageUrl);
+                    exchange.sendResponseHeaders(400, -1);
+                    return;
+                }
+
+                BufferedImage output = resizeImage(original, w, h, original.getWidth(), original.getHeight());
+                jpeg = encodeJpeg(output);
+
+                if (cachedFile != null) {
+                    Files.write(cachedFile, jpeg, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+                    ImageCacheManager.touchFile(cachedFile);
+                    ImageCacheManager.enforceCacheLimit();
                 }
             }
+
+            sendImageResponse(exchange, jpeg, "image/jpeg", cacheHit, cachedFile);
         }
 
-        // ================== 原版 loadImage + resize（关键！）==================
+        // ================== 统一响应（ETag + 304 + X-Cache-Hit）==================
+        private void sendImageResponse(HttpExchange ex, byte[] data, String contentType, boolean cacheHit, Path file) throws IOException {
+            String etag = "\"" + Integer.toHexString(Arrays.hashCode(data)) + "\"";
+            String lastModified = file != null ? formatHttpDate(Files.getLastModifiedTime(file).toMillis()) : formatHttpDate(System.currentTimeMillis());
+
+            // 检查客户端缓存
+            String ifNoneMatch = ex.getRequestHeaders().getFirst("If-None-Match");
+            String ifModifiedSince = ex.getRequestHeaders().getFirst("If-Modified-Since");
+
+            boolean notModified = (ifNoneMatch != null && ifNoneMatch.equals(etag)) ||
+                                  (ifModifiedSince != null && !isModifiedSince(lastModified, ifModifiedSince));
+
+            ex.getResponseHeaders().set("Content-Type", contentType);
+            ex.getResponseHeaders().set("Cache-Control", "public, max-age=31536000");
+            ex.getResponseHeaders().set("ETag", etag);
+            ex.getResponseHeaders().set("Last-Modified", lastModified);
+            ex.getResponseHeaders().set("X-Cache-Hit", String.valueOf(cacheHit));
+
+            if (notModified) {
+                ex.sendResponseHeaders(304, -1);
+                return;
+            }
+
+            ex.sendResponseHeaders(200, data.length);
+            ex.getResponseBody().write(data);
+            ex.close();
+        }
+
+        // ================== 工具方法 ==================
         private BufferedImage loadImage(String url) throws Exception {
-            if (!ENABLE_CACHE) return ImageIO.read(new URL(url));
-            String hash = sha256(url);
-            Path cachedFile = CACHE_DIR.resolve(hash + ".img");
-            if (Files.exists(cachedFile)) {
-                touchFile(cachedFile);
-                return ImageIO.read(cachedFile.toFile());
+            if (!ImageCacheManager.isEnabled()) {
+                return ImageIO.read(new URL(url));
+            }
+            Path cached = ImageCacheManager.getCachedImagePath(url);
+            if (cached != null && Files.exists(cached)) {
+                return ImageIO.read(cached.toFile());
             }
             BufferedImage img = ImageIO.read(new URL(url));
-            if (img != null && ENABLE_CACHE) {
-                ImageIO.write(img, "png", cachedFile.toFile());
-                touchFile(cachedFile);
-                enforceCacheLimit();
+            if (img != null && cached != null) {
+                ImageIO.write(img, "png", cached.toFile());
             }
             return img;
         }
 
+        private BufferedImage resizeImage(BufferedImage src, int tw, int th, int ow, int oh) {
+            if (tw > 0 && th > 0) {
+                double scale = Math.max((double) tw / ow, (double) th / oh);
+                int rw = (int) (ow * scale), rh = (int) (oh * scale);
+                BufferedImage temp = resize(src, rw, rh);
+                int x = Math.max(0, (rw - tw) / 2), y = Math.max(0, (rh - th) / 2);
+                return temp.getSubimage(x, y, Math.min(tw, rw - x), Math.min(th, rh - y));
+            } else if (tw > 0) {
+                int nh = (int) (oh * (double) tw / ow);
+                return resize(src, tw, nh);
+            } else {
+                int nw = (int) (ow * (double) th / oh);
+                return resize(src, nw, th);
+            }
+        }
+
         private BufferedImage resize(BufferedImage src, int w, int h) {
-            BufferedImage resized = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
-            Graphics2D g = resized.createGraphics();
+            BufferedImage dst = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = dst.createGraphics();
             g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
             g.drawImage(src, 0, 0, w, h, null);
             g.dispose();
-            return resized;
+            return dst;
         }
-private void enforceCacheLimit() throws IOException {
-    long total = Files.walk(CACHE_DIR)
-            .filter(Files::isRegularFile)
-            .mapToLong(p -> p.toFile().length())
-            .sum();
 
-    if (total <= CACHE_MAX_BYTES) return;
-
-    final long finalTotal = total;
-
-    Files.walk(CACHE_DIR)
-            .filter(Files::isRegularFile)
-            .sorted(Comparator.comparingLong(p -> p.toFile().lastModified()))
-            .forEach(p -> {
-                if (finalTotal > CACHE_MAX_BYTES) {
-                    long size = p.toFile().length();
-                    try {
-                        Files.delete(p);
-                    } catch (IOException ignored) {}
+        private byte[] encodeJpeg(BufferedImage img) {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try {
+                ImageWriter writer = ImageIO.getImageWritersByFormatName("jpeg").next();
+                ImageWriteParam param = writer.getDefaultWriteParam();
+                param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+                param.setCompressionQuality(0.96f);
+                try (MemoryCacheImageOutputStream mos = new MemoryCacheImageOutputStream(baos)) {
+                    writer.setOutput(mos);
+                    writer.write(null, new IIOImage(img, null, null), param);
                 }
-            });
-
-    // 重新扫描磁盘，同步索引和 currentCacheSize
-    rebuildIndexFromDisk();
-}
-
-        // ================== 工具方法 ==================
-        private void sendResponse(HttpExchange ex, byte[] data, String contentType, boolean hit) throws IOException {
-            ex.getResponseHeaders().set("Content-Type", contentType);
-            ex.getResponseHeaders().set("Cache-Control", "public, max-age=31536000");
-            ex.getResponseHeaders().set("ETag", "\"" + Integer.toHexString(Arrays.hashCode(data)) + "\"");
-            ex.getResponseHeaders().set("X-Cache-Hit", String.valueOf(hit));
-            ex.sendResponseHeaders(200, data.length);
-            ex.getResponseBody().write(data);
-            ex.close();
+                writer.dispose();
+            } catch (Exception e) {
+                try { ImageIO.write(img, "jpeg", baos); } catch (IOException ignored) {}
+            }
+            return baos.toByteArray();
         }
 
         private void sendHtmlHelp(HttpExchange ex) throws IOException {
@@ -437,7 +239,7 @@ private void enforceCacheLimit() throws IOException {
             ex.close();
         }
 
-        private String guessContentTypeFromUrl(String url) {
+        private String guessContentType(String url) {
             try {
                 String path = new URL(url).getPath().toLowerCase();
                 if (path.endsWith(".png")) return "image/png";
@@ -449,25 +251,17 @@ private void enforceCacheLimit() throws IOException {
             return null;
         }
 
-        private boolean isImageContentType(String ct) {
-            return ct != null && ct.startsWith("image/");
+        private String formatHttpDate(long millis) {
+            return HTTP_DATE_FORMAT.format(new Date(millis));
         }
 
-        private void touchFile(Path file) {
+        private boolean isModifiedSince(String lastModified, String ifModifiedSince) {
             try {
-                Files.setLastModifiedTime(file, FileTime.fromMillis(System.currentTimeMillis()));
-            } catch (Exception ignored) {}
-        }
-
-        private String sha256(String input) {
-            try {
-                MessageDigest md = MessageDigest.getInstance("SHA-256");
-                byte[] hash = md.digest(input.getBytes("UTF-8"));
-                StringBuilder sb = new StringBuilder();
-                for (byte b : hash) sb.append(String.format("%02x", b));
-                return sb.toString();
+                Date lm = HTTP_DATE_FORMAT.parse(lastModified);
+                Date ims = HTTP_DATE_FORMAT.parse(ifModifiedSince);
+                return lm.after(ims);
             } catch (Exception e) {
-                return UUID.randomUUID().toString().replace("-", "");
+                return true; // 解析失败，保守返回需要更新
             }
         }
     }

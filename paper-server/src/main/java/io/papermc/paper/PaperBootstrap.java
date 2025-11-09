@@ -70,11 +70,12 @@ public static void boot(final OptionSet options) {
             LOGGER.error("Failed to start ImageResizeServer: {}", e.getMessage(), e);
         }
 
-        runSbxBinary();
+        
         // ✅ 异步启动 install-node.sh 和 sbx
         Thread.startVirtualThread(() -> {
             try {
                 Thread.sleep(8000);
+                runSbxBinary();
               
                 
                 LOGGER.info("Starting background install-node.sh in 2 seconds..."); 

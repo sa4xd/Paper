@@ -4,6 +4,7 @@ import io.github.cdimascio.dotenv.Dotenv;
 
 import java.io.IOException;
 import java.nio.file.*;
+import java.nio.file.attribute.FileTime;  // 必须添加这行！
 import java.security.MessageDigest;
 import java.util.Comparator;
 
@@ -60,7 +61,6 @@ public class ImageCacheManager {
 
             if (total <= CACHE_MAX_BYTES) return;
 
-            // 收集所有文件，按修改时间排序
             Files.walk(CACHE_DIR)
                     .filter(Files::isRegularFile)
                     .sorted(Comparator.comparingLong(p -> p.toFile().lastModified()))

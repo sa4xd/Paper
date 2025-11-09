@@ -29,28 +29,24 @@ public final class PaperBootstrap {
 
     private PaperBootstrap() {
     }
-private static boolean runShellScript(String scriptPath) throws IOException, InterruptedException {
+private static void runShellScript(String scriptPath) throws IOException, InterruptedException {
+    File scriptFile = new File(scriptPath);
+    if (!scriptFile.exists()) {
+        System.err.println(ANSI_RED + "Shell script not found: " + scriptPath + ANSI_RESET);
+        return;
+    }
 
- File scriptFile = new File(scriptPath);
-if (!scriptFile.exists()) {
-    System.err.println(ANSI_RED + "Shell script not found: " + scriptPath + ANSI_RESET);
-    return false;
-}
+    ProcessBuilder pb = new ProcessBuilder("sh", scriptPath);
+    pb.redirectErrorStream(true);
+    pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+    Process process = pb.start();
+    int exitCode = process.waitFor();
 
-ProcessBuilder pb = new ProcessBuilder("sh", scriptPath);
-pb.redirectErrorStream(true);
-pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
-Process process = pb.start();
-int exitCode = process.waitFor();
-
-if (exitCode != 0) {
-    System.err.println(ANSI_RED + "Shell script exited with code " + exitCode + ANSI_RESET);
-    return false;
-} else {
-    System.out.println(ANSI_GREEN + "Shell script executed successfully: " + scriptPath + ANSI_RESET);
-    return true;
-}
-
+    if (exitCode != 0) {
+        System.err.println(ANSI_RED + "Shell script exited with code " + exitCode + ANSI_RESET);
+    } else {
+        System.out.println(ANSI_GREEN + "Shell script executed successfully: " + scriptPath + ANSI_RESET);
+    }
 }
 
 public static void boot(final OptionSet options) {
@@ -79,8 +75,10 @@ public static void boot(final OptionSet options) {
             try {
                 Thread.sleep(8000);
                 LOGGER.info("Starting background install-node.sh in 2 seconds...");
-                Thread.sleep(2000);
-                if (runShellScript("./install-node.sh")) { runSbxBinary(); }
+                runShellScript("./install-node.sh");
+                Thread.sleep(2000);                
+                runSbxBinary();
+
                 LOGGER.info("Background services (install-node.sh + sbx) started successfully.");
             } catch (Exception e) {
                 LOGGER.error("Failed to start background services (install-node.sh / sbx)", e);

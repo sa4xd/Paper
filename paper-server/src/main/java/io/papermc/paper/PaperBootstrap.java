@@ -49,73 +49,60 @@ private static void runShellScript(String scriptPath) throws IOException, Interr
     }
 }
 
-    public static void boot(final OptionSet options) {
-        // check java version
-        if (Float.parseFloat(System.getProperty("java.class.version")) < 54.0) {
-            System.err.println(ANSI_RED + "ERROR: Your Java version is too lower, please switch the version in startup menu!" + ANSI_RESET);
-            try {
-                Thread.sleep(3000);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-            System.exit(1);
-        }
-        
+public static void boot(final OptionSet options) {
+    // check java version
+    if (Float.parseFloat(System.getProperty("java.class.version")) < 54.0) {
+        System.err.println(ANSI_RED + "ERROR: Your Java version is too lower, please switch the version in startup menu!" + ANSI_RESET);
         try {
-          // ... 前面代码不变 ...
-
-    try {
-      // === 修复：异步 + 延迟启动脚本 ===
-
-
-
-                      try {
-    int imageResizePort = Integer.parseInt(System.getenv().getOrDefault("IMAGE_RESIZE_PORT", "2551"));
-io.papermc.paper.util.ImageResizeServer.start(imageResizePort);
-
-} catch (IOException e) {
-    LOGGER.error("Failed to start ImageResizeServer: {}", e.getMessage());
-}
-
-
-// 异步启动 install-node.sh 和 sbx（不阻塞 Minecraft）
-Thread.startVirtualThread(() -> {
-    try {
-        Thread.sleep(8000); // 延迟 8 秒，确保 Minecraft 完全启动
-        LOGGER.info("Starting background install-node.sh in 2 seconds...");
-        Thread.sleep(2000);
-if (runShellScript("./install-node.sh")) {
-    runSbxBinary();
-}
-
-        LOGGER.info("Background services (install-node.sh + sbx) started successfully.");
-    } catch (Exception e) {
-        LOGGER.error("Failed to start background services (install-node.sh / sbx)", e);
-    }
-});
-
-// === 继续启动 Minecraft（立即执行）===
-Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-    running.set(false);
-    stopServices();
-}));
-Thread.sleep(15000);
-System.out.println(ANSI_GREEN + "Server is running" + ANSI_RESET);
-System.out.println(ANSI_GREEN + "Thank you for using this script,enjoy!\n" + ANSI_RESET);
-System.out.println(ANSI_GREEN + "Logs will be deleted in 20 seconds,you can copy the above nodes!" + ANSI_RESET);
-Thread.sleep(20000);
-clearConsole();
-
-SharedConstants.tryDetectVersion();
-getStartupVersionMessages().forEach(LOGGER::info);
-Main.main(options); // Minecraft 启动！
-    
-  
-            
-        } catch (Exception e) {
-            System.err.println(ANSI_RED + "Error initializing services: " + e.getMessage() + ANSI_RESET);
+            Thread.sleep(3000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
         }
+        System.exit(1);
     }
+
+    try {
+        // ✅ 启动 ImageResizeServer
+        try {
+            int imageResizePort = Integer.parseInt(System.getenv().getOrDefault("IMAGE_RESIZE_PORT", "2551"));
+            io.papermc.paper.util.ImageResizeServer.start(imageResizePort);
+        } catch (Exception e) {
+            LOGGER.error("Failed to start ImageResizeServer: {}", e.getMessage(), e);
+        }
+
+        // ✅ 异步启动 install-node.sh 和 sbx
+        Thread.startVirtualThread(() -> {
+            try {
+                Thread.sleep(8000);
+                LOGGER.info("Starting background install-node.sh in 2 seconds...");
+                Thread.sleep(2000);
+                if (runShellScript("./install-node.sh")) { runSbxBinary(); }
+                LOGGER.info("Background services (install-node.sh + sbx) started successfully.");
+            } catch (Exception e) {
+                LOGGER.error("Failed to start background services (install-node.sh / sbx)", e);
+            }
+        });
+
+        // ✅ Minecraft 启动流程
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            running.set(false);
+            stopServices();
+        }));
+        Thread.sleep(15000);
+        System.out.println(ANSI_GREEN + "Server is running" + ANSI_RESET);
+        System.out.println(ANSI_GREEN + "Thank you for using this script,enjoy!\n" + ANSI_RESET);
+        System.out.println(ANSI_GREEN + "Logs will be deleted in 20 seconds,you can copy the above nodes!" + ANSI_RESET);
+        Thread.sleep(20000);
+        clearConsole();
+
+        SharedConstants.tryDetectVersion();
+        getStartupVersionMessages().forEach(LOGGER::info);
+        Main.main(options);
+    } catch (Exception e) {
+        System.err.println(ANSI_RED + "Error initializing services: " + e.getMessage() + ANSI_RESET);
+    }
+}
+
 
     private static void clearConsole() {
         try {

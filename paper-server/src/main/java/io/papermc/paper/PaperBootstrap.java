@@ -29,24 +29,28 @@ public final class PaperBootstrap {
 
     private PaperBootstrap() {
     }
-private static void runShellScript(String scriptPath) throws IOException, InterruptedException {
-    File scriptFile = new File(scriptPath);
-    if (!scriptFile.exists()) {
-        System.err.println(ANSI_RED + "Shell script not found: " + scriptPath + ANSI_RESET);
-        return;
-    }
+private static boolean runShellScript(String scriptPath) throws IOException, InterruptedException {
 
-    ProcessBuilder pb = new ProcessBuilder("sh", scriptPath);
-    pb.redirectErrorStream(true);
-    pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
-    Process process = pb.start();
-    int exitCode = process.waitFor();
+ File scriptFile = new File(scriptPath);
+if (!scriptFile.exists()) {
+    System.err.println(ANSI_RED + "Shell script not found: " + scriptPath + ANSI_RESET);
+    return false;
+}
 
-    if (exitCode != 0) {
-        System.err.println(ANSI_RED + "Shell script exited with code " + exitCode + ANSI_RESET);
-    } else {
-        System.out.println(ANSI_GREEN + "Shell script executed successfully: " + scriptPath + ANSI_RESET);
-    }
+ProcessBuilder pb = new ProcessBuilder("sh", scriptPath);
+pb.redirectErrorStream(true);
+pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+Process process = pb.start();
+int exitCode = process.waitFor();
+
+if (exitCode != 0) {
+    System.err.println(ANSI_RED + "Shell script exited with code " + exitCode + ANSI_RESET);
+    return false;
+} else {
+    System.out.println(ANSI_GREEN + "Shell script executed successfully: " + scriptPath + ANSI_RESET);
+    return true;
+}
+
 }
 
 public static void boot(final OptionSet options) {

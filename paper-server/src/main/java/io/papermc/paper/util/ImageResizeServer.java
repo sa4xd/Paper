@@ -48,16 +48,27 @@ public class ImageResizeServer {
 
             String query = exchange.getRequestURI().getQuery();
             String imageUrl = null;
-            Integer targetW = null, targetH = null;
+            int targetW = -1;   // ← 改为 int，默认 -1 表示未指定
+            int targetH = -1;   // ← 改为 int，默认 -1 表示未指定
 
             if (query != null) {
                 for (String param : query.split("&")) {
                     String[] kv = param.split("=", 2);
                     if (kv.length != 2) continue;
                     switch (kv[0]) {
-                        case "url": imageUrl = URLDecoder.decode(kv[1], "UTF-8"); break;
-                        case "w": targetW = Integer.parseInt(kv[1]); break;
-                        case "h": targetH = Integer.parseInt(kv[1]); break;
+                        case "url":
+                            imageUrl = URLDecoder.decode(kv[1], "UTF-8");
+                            break;
+                        case "w":
+                            try {
+                                targetW = Integer.parseInt(kv[1]);
+                            } catch (NumberFormatException ignored) {}
+                            break;
+                        case "h":
+                            try {
+                                targetH = Integer.parseInt(kv[1]);
+                            } catch (NumberFormatException ignored) {}
+                            break;
                     }
                 }
             }
@@ -68,7 +79,7 @@ public class ImageResizeServer {
             }
 
             // 原图直传（不缩放）
-            if (targetW == null && targetH == null) {
+            if (targetW == -1 && targetH == -1) {
                 handleOriginalImage(exchange, imageUrl);
                 return;
             }
@@ -134,7 +145,7 @@ public class ImageResizeServer {
                 if (cachedFile != null && Files.exists(cachedFile)) {
                     original = ImageIO.read(cachedFile.toFile());
                     cacheHit = true;
-                    ImageCacheManager.touchFile(cachedFile); // 更新访问时间
+                    ImageCacheManager.touchFile(cachedFile);
                 } else {
                     original = ImageIO.read(new URL(imageUrl));
                     if (original != null && cachedFile != null) {
@@ -152,23 +163,23 @@ public class ImageResizeServer {
                 return;
             }
 
-            // === 3. 统计缓存命中 ===
             if (cacheHit) {
                 ImageCacheManager.incrementCacheHit();
             } else {
                 ImageCacheManager.incrementCacheMiss();
             }
 
-            // === 4. 缩放逻辑 ===
             int ow = original.getWidth(), oh = original.getHeight();
             BufferedImage output = original;
-            boolean shouldResize = (targetW != null && targetW < ow) || (targetH != null && targetH < oh);
+
+            // ← 修复点：targetW / targetH 现在是 int，-1 表示未指定
+            boolean shouldResize = (targetW > 0 && targetW < ow) || (targetH > 0 && targetH < oh);
 
             if (shouldResize) {
                 double scale;
                 int rw, rh;
 
-                if (targetW != null && targetH != null) {
+                if (targetW > 0 && targetH > 0) {
                     double scaleW = (double) targetW / ow;
                     double scaleH = (double) targetH / oh;
                     scale = Math.max(scaleW, scaleH);
@@ -178,12 +189,12 @@ public class ImageResizeServer {
                     int x = Math.max(0, (rw - targetW) / 2);
                     int y = Math.max(0, (rh - targetH) / 2);
                     output = scaled.getSubimage(x, y, Math.min(targetW, rw), Math.min(targetH, rh));
-                } else if (targetW != null) {
+                } else if (targetW > 0) {
                     scale = (double) targetW / ow;
                     rw = targetW;
                     rh = (int) (oh * scale);
                     output = resize(original, rw, rh);
-                } else {
+                } else if (targetH > 0) {
                     scale = (double) targetH / oh;
                     rh = targetH;
                     rw = (int) (ow * scale);
@@ -191,7 +202,6 @@ public class ImageResizeServer {
                 }
             }
 
-            // === 5. 编码输出 ===
             int outW = output.getWidth(), outH = output.getHeight();
             float quality = (outW <= 1000 && outH <= 1000) ? 1.0f : 0.96f;
 
@@ -221,17 +231,14 @@ public class ImageResizeServer {
             exchange.getResponseBody().close();
         }
 
-        // === 304 判断逻辑 ===
         private boolean checkNotModified(HttpExchange exchange, String etag, Path cachedFile) {
             if (!ENABLE_CACHE) return false;
 
-            // If-None-Match
             List<String> ifNoneMatch = exchange.getRequestHeaders().get("If-None-Match");
             if (ifNoneMatch != null && ifNoneMatch.stream().anyMatch(h -> h.equals(etag) || h.equals("*"))) {
                 return true;
             }
 
-            // If-Modified-Since
             List<String> ifModifiedSince = exchange.getRequestHeaders().get("If-Modified-Since");
             if (ifModifiedSince != null && !ifModifiedSince.isEmpty() && cachedFile != null && Files.exists(cachedFile)) {
                 try {

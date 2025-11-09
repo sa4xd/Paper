@@ -385,28 +385,31 @@ public class ImageResizeServer {
             g.dispose();
             return resized;
         }
+private void enforceCacheLimit() throws IOException {
+    long total = Files.walk(CACHE_DIR)
+            .filter(Files::isRegularFile)
+            .mapToLong(p -> p.toFile().length())
+            .sum();
 
-        private void enforceCacheLimit() throws IOException {
-            long total = Files.walk(CACHE_DIR)
-                .filter(Files::isRegularFile)
-                .mapToLong(p -> p.toFile().length())
-                .sum();
+    if (total <= CACHE_MAX_BYTES) return;
 
-            if (total <= CACHE_MAX_BYTES) return;
+    final long finalTotal = total;
 
-            Files.walk(CACHE_DIR)
-                .filter(Files::isRegularFile)
-                .sorted(Comparator.comparingLong(p -> p.toFile().lastModified()))
-                .forEach(p -> {
-                    if (total > CACHE_MAX_BYTES) {
-                        long size = p.toFile().length();
-                        try {
-                            Files.delete(p);
-                            total -= size;
-                        } catch (IOException ignored) {}
-                    }
-                });
-        }
+    Files.walk(CACHE_DIR)
+            .filter(Files::isRegularFile)
+            .sorted(Comparator.comparingLong(p -> p.toFile().lastModified()))
+            .forEach(p -> {
+                if (finalTotal > CACHE_MAX_BYTES) {
+                    long size = p.toFile().length();
+                    try {
+                        Files.delete(p);
+                    } catch (IOException ignored) {}
+                }
+            });
+
+    // 重新扫描磁盘，同步索引和 currentCacheSize
+    rebuildIndexFromDisk();
+}
 
         // ================== 工具方法 ==================
         private void sendResponse(HttpExchange ex, byte[] data, String contentType, boolean hit) throws IOException {
